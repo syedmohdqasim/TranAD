@@ -162,3 +162,83 @@ def pot_eval(init_score, score, label, q=1e-5, level=0.02):
         'threshold': pot_th,
         # 'pot-latency': p_latency
     }, np.array(pred)
+
+
+def adjust_predicts_no_labels(score, threshold=None, pred=None):
+    """
+    Calculate adjusted predict labels using given `score` and `threshold` (or given `pred`).
+
+    Args:
+        score (np.ndarray): The anomaly score
+        threshold (float): The threshold of anomaly score.
+            A point is labeled as "anomaly" if its score is higher than the threshold.
+        pred (np.ndarray or None): If not None, use the given predictions directly instead of calculating from score and threshold.
+
+    Returns:
+        np.ndarray: Predict labels
+    """
+    if pred is None:
+        predict = score > threshold  # If no pred, calculate predictions using threshold
+    else:
+        predict = pred  # Use given predictions
+
+    anomaly_state = False
+    for i in range(len(score)):
+        if predict[i] and not anomaly_state:
+            # Start anomaly state
+            anomaly_state = True
+            for j in range(i, 0, -1):  # Backward loop
+                if not predict[j]:  # If prior point wasn't predicted as anomaly
+                    predict[j] = True  # Adjust it to anomaly
+        elif not predict[i]:
+            # End anomaly state
+            anomaly_state = False
+
+    return predict
+
+
+def pot_eval_syed(init_score, score, q=1e-5, level=0.02):
+    """
+    Run POT method on given score.
+    Args:
+        init_score (np.ndarray): The data to get init threshold.
+            it should be the anomaly score of train set.
+        score (np.ndarray): The data to run POT method.
+            it should be the anomaly score of test set.
+        label:
+        q (float): Detection level (risk)
+        level (float): Probability associated with the initial threshold t
+    Returns:
+        dict: pot result dict
+    """
+    lms = lm[0]
+    while True:
+        try:
+            s = SPOT(q)  # SPOT object
+            s.fit(init_score, score)  # data import
+            s.initialize(level=lms, min_extrema=False, verbose=False)  # initialization step
+        except: lms = lms * 0.999
+        else: break
+    ret = s.run(dynamic=False)  # run
+    # print(len(ret['alarms']))
+    # print(len(ret['thresholds']))
+    pot_th = np.mean(ret['thresholds'][0]) * lm[1]
+    # pot_th = np.percentile(score, 100 * lm[0])
+    # np.percentile(score, 100 * lm[0])
+    pred = adjust_predicts_no_labels(score, pot_th)
+    # DEBUG - np.save(f'{debug}.npy', np.array(pred))
+    # DEBUG - print(np.argwhere(np.array(pred)))
+    # p_t = calc_point2point(pred, label)
+    # print('POT result: ', p_t, pot_th, p_latency)
+    return {
+        'f1': 'NA',
+        'precision': 'NA',
+        'recall': 'NA',
+        'TP': 'NA',
+        'TN': 'NA',
+        'FP': 'NA',
+        'FN': 'NA',
+        'ROC/AUC': 'NA',
+        'threshold': pot_th,
+        # 'pot-latency': p_latency
+    }, np.array(pred)
