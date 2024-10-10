@@ -15,9 +15,6 @@ from time import time
 from pprint import pprint
 # from beepy import beep
 from sklearn.preprocessing import MinMaxScaler
-from collections import Counter
-import json
-import glob
 
 def convert_to_windows(data, model):
 	windows = []; w_size = model.n_window
@@ -309,22 +306,6 @@ def pre_process_data_remove_timestamp(df):
                            index=df_scaled.index)
     return  x_train
 
-def pre_process_outage_data_remove_timestamp(df):
-	scaler = MinMaxScaler(feature_range=(0, 1), clip=True)
-	df_scaled_test = df.copy()
-	df_scaled_test['Timestamp'] = pd.to_datetime(df_scaled_test['Timestamp'])
-	df_scaled_test.set_index(['Timestamp'], inplace=True)
-	df_scaled_test = df_scaled_test[df_scaled_test['hostname'] == 'mgmt01.uc.chameleoncloud.org']
-	df_scaled_test = df_scaled_test.interpolate(method='linear')
-	df_scaled_test = df_scaled_test.dropna()
-	df_scaled_test = df_scaled_test.reset_index()
-	df_scaled_test = df_scaled_test.drop(columns=['hostname', 'kolla_external_fqdn', 'Timestamp'])
-	df_scaled_test = df_scaled_test.drop(columns=['cpu_usage_metric_data'])
-	df_scaled_test = pd.DataFrame(scaler.fit_transform(df_scaled_test), columns=df_scaled_test.columns,
-								  index=df_scaled_test.index)
-	df_scaled_test = df_scaled_test[x_train.columns]
-	return df_scaled_test
-
 
 if __name__ == '__main__':
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -357,92 +338,33 @@ if __name__ == '__main__':
 	### Testing phase
 	torch.zero_grad = True
 	model.eval()
-	loss, y_pred = backprop(0, model, trainD, trainD, optimizer, scheduler, training=False)
-	# print(f'{color.HEADER}Testing {args.model} on {args.dataset}{color.ENDC}')
-	# loss, y_pred = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
-	lossT=np.mean(loss, axis=1)
-	percentile_90 = np.percentile(lossT, 90)
-	percentile_99 = np.percentile(lossT, 99)
+	print(f'{color.HEADER}Testing {args.model} on {args.dataset}{color.ENDC}')
+	loss, y_pred = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
+
 	### Plot curves
-	files = []
-	anomalous_percentages = []
-	anomalous_90_percentages = []
-	root_causes = []
-	labels = []
-	root_dir = '../chameleon-anomaly/labelled/outage_metrics/'
-	csv_files = glob.glob(os.path.join(root_dir, '**', '*.csv'), recursive=True)
-	for file in csv_files:
-		# Extract the middle part of the path for labels
-		label = os.path.basename(os.path.dirname(file))
-		labels.append(label)
+	# if not args.test:
+	# 	if 'TranAD' in model.name: testO = torch.roll(testO, 1, 0)
+	# 	plotter(f'{args.model}_{args.dataset}', trainD, y_pred, loss, labels)
 
-		# Process each CSV file
-		test_df = pd.read_csv(file)
-		x_test_scaled=pre_process_outage_data_remove_timestamp(test_df)
-		x_test_scaled = x_test_scaled[x_train.columns]
-		test_loader = DataLoader(x_test_scaled.values, batch_size=x_test_scaled.shape[0])
-		testD = next(iter(test_loader))
-		if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT',
-						  'MAD_GAN'] or 'TranAD' in model.name:
-			 testD = convert_to_windows(testD, model)
+	### Scores
+	df = pd.DataFrame()
+	lossT, _ = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
+	for i in range(loss.shape[1]):
+		lt, l, ls = lossT[:, i], loss[:, i], labels[:, i]
+		result, pred = pot_eval_syed(lt, l, ls); preds.append(pred)
+		df = df._append(result, ignore_index=True)
+	# preds = np.concatenate([i.reshape(-1, 1) + 0 for i in preds], axis=1)
+	# pd.DataFrame(preds, columns=[str(i) for i in range(10)]).to_csv('labels.csv')
+	lossTfinal, lossFinal = np.mean(lossT, axis=1), np.mean(loss, axis=1)
+	# labelsFinal = (np.sum(labels, axis=1) >= 1) + 0
+	result, _ = pot_eval_syed(lossTfinal, lossFinal, labels)
+	# result.update(hit_att(loss, labels))
+	# result.update(ndcg(loss, labels))
+	print(df)
+	pprint(result)
 
-		loss, y_pred = backprop(0, model, testD, testD, optimizer, scheduler, training=False)
-		# Predict anomalies
-		# y_pred_test, x_test_recon_errors = vae.predict_anomaly(x_test_scaled.values)
-		print(x_test_scaled.shape)
-		# loss, y_pred = backprop(0, model, x_test_scaled.values, x_test_scaled.values, optimizer, scheduler, training=False)
+	percentile_90 = np.percentile(lossTfinal, 90)
+	percentile_90 = np.percentile(lossTfinal, 99)
 
-		lossTfinal  = np.mean(loss, axis=1)
-		top_5_column_names= []
-		column_counts= {}
-
-		rows_above_t=np.where(lossTfinal > percentile_99)
-		for row in rows_above_t[0]:
-			top_5_columns_per_row = np.argsort(loss[row])[::-1][:5]
-			top_5_column_names.append(list(set([x_test_scaled.columns[idx % 24] for idx in top_5_columns_per_row])))
-
-		flattened_columns = [col for sublist in top_5_column_names for col in sublist]
-		column_counts = Counter(flattened_columns)
-		top_5_columns = column_counts.most_common(5)
-		top_5_divided = [(column, count / rows_above_t[0].size) for column, count in top_5_columns]
-		# root_causes.append({label:{top_5_divided}})
-		y_pred_test = np.where(lossTfinal > percentile_99, 1, 0)
-		if 1 in y_pred_test:
-			count_ones = np.count_nonzero(y_pred_test)
-			total_elements = len(y_pred_test)
-			percentage_ones = (count_ones / total_elements) * 100
-			files.append(file)
-			anomalous_percentages.append(percentage_ones)
-			root_causes.append([label, percentage_ones, top_5_divided])
-			print(f'{file} - anomalous: {percentage_ones:.2f}%')
-
-		# Predict anomalies using the 90th percentile method
-		y_pred_test = np.where(lossTfinal > percentile_90, 1, 0)
-		if 1 in y_pred_test:
-			count_ones = np.count_nonzero(y_pred_test)
-			total_elements = len(y_pred_test)
-			percentage_ones = (count_ones / total_elements) * 100
-			anomalous_90_percentages.append(percentage_ones)
-			print(f'{file} - anomalous_90: {percentage_ones:.2f}%')
-
-	# Plot anomalous percentages
-	with open('root_cause_result_usad.json', 'w') as f:
-		json.dump(root_causes, f, indent=4)
-	plt.figure(figsize=(10, 6))
-	plt.barh(labels, anomalous_percentages, color='blue', alpha=0.7)
-	plt.xlabel('Percentage of Anomalies')
-	plt.ylabel('Outage ')
-	plt.title('Anomalous Percentage')
-	plt.tight_layout()
-	plt.savefig(f'outage_anomaly_99_{model.name}')
-	plt.show()
-
-	# Plot anomalous 90 percentages
-	plt.figure(figsize=(10, 6))
-	plt.barh(labels, anomalous_90_percentages, color='red', alpha=0.7)
-	plt.xlabel('Percentage of Anomalies')
-	plt.ylabel('Outage ')
-	plt.title('Anomalous 90 Percentage')
-	plt.tight_layout()
-	plt.savefig(f'outage_anomaly_prodigy_90_{model.name}')
-	plt.show()
+	# pprint(getresults2(df, result))
+	# beep(4)

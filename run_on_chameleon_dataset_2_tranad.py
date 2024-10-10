@@ -16,6 +16,8 @@ from pprint import pprint
 # from beepy import beep
 from sklearn.preprocessing import MinMaxScaler
 import glob
+from collections import Counter
+import json
 
 def convert_to_windows(data, model):
 	windows = []; w_size = model.n_window
@@ -366,6 +368,7 @@ if __name__ == '__main__':
 	files = []
 	anomalous_percentages = []
 	anomalous_90_percentages = []
+	root_causes = []
 	labels = []
 	root_dir = '../chameleon-anomaly/labelled/outage_metrics/'
 	csv_files = glob.glob(os.path.join(root_dir, '**', '*.csv'), recursive=True)
@@ -391,8 +394,19 @@ if __name__ == '__main__':
 		# loss, y_pred = backprop(0, model, x_test_scaled.values, x_test_scaled.values, optimizer, scheduler, training=False)
 
 		lossTfinal  = np.mean(loss, axis=1)
+		top_5_column_names= []
+		column_counts= {}
 
+		rows_above_t=np.where(lossTfinal > percentile_99)
+		for row in rows_above_t[0]:
+			top_5_columns_per_row = np.argsort(loss[row])[::-1][:5]
+			top_5_column_names.append([x_test_scaled.columns[idx] for idx in top_5_columns_per_row])
 
+		flattened_columns = [col for sublist in top_5_column_names for col in sublist]
+		column_counts = Counter(flattened_columns)
+		top_5_columns = column_counts.most_common(5)
+		top_5_divided = [(column, count / rows_above_t[0].size) for column, count in top_5_columns]
+		# root_causes.append({label:{top_5_divided}})
 		y_pred_test = np.where(lossTfinal > percentile_99, 1, 0)
 		if 1 in y_pred_test:
 			count_ones = np.count_nonzero(y_pred_test)
@@ -400,7 +414,9 @@ if __name__ == '__main__':
 			percentage_ones = (count_ones / total_elements) * 100
 			files.append(file)
 			anomalous_percentages.append(percentage_ones)
+			root_causes.append([label, percentage_ones, top_5_divided])
 			print(f'{file} - anomalous: {percentage_ones:.2f}%')
+
 
 		# Predict anomalies using the 90th percentile method
 		y_pred_test = np.where(lossTfinal > percentile_90, 1, 0)
@@ -412,6 +428,10 @@ if __name__ == '__main__':
 			print(f'{file} - anomalous_90: {percentage_ones:.2f}%')
 
 	# Plot anomalous percentages
+	with open('root_cause_result_tranad.json', 'w') as f:
+		json.dump(root_causes, f, indent=4)
+
+
 	plt.figure(figsize=(10, 6))
 	plt.barh(labels, anomalous_percentages, color='blue', alpha=0.7)
 	plt.xlabel('Percentage of Anomalies')
